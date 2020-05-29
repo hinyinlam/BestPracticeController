@@ -1,21 +1,13 @@
 package io.example.bestpracticecontroller;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.github.fge.jsonpatch.diff.JsonDiff;
-import com.google.gson.Gson;
-import io.kubernetes.client.custom.V1Patch;
 import io.kubernetes.client.extended.controller.Controller;
 import io.kubernetes.client.extended.controller.ControllerManager;
-import io.kubernetes.client.extended.controller.DefaultController;
 import io.kubernetes.client.extended.controller.builder.ControllerBuilder;
 import io.kubernetes.client.extended.controller.reconciler.Reconciler;
 import io.kubernetes.client.extended.controller.reconciler.Request;
 import io.kubernetes.client.extended.controller.reconciler.Result;
 import io.kubernetes.client.extended.workqueue.DefaultRateLimitingQueue;
 import io.kubernetes.client.extended.workqueue.RateLimitingQueue;
-import io.kubernetes.client.informer.ResourceEventHandler;
 import io.kubernetes.client.informer.SharedIndexInformer;
 import io.kubernetes.client.informer.SharedInformerFactory;
 import io.kubernetes.client.informer.cache.Indexer;
@@ -23,11 +15,10 @@ import io.kubernetes.client.openapi.ApiClient;
 import io.kubernetes.client.openapi.ApiException;
 import io.kubernetes.client.openapi.Configuration;
 import io.kubernetes.client.openapi.apis.AppsV1Api;
-import io.kubernetes.client.openapi.models.*;
+import io.kubernetes.client.openapi.models.V1Deployment;
+import io.kubernetes.client.openapi.models.V1DeploymentList;
+import io.kubernetes.client.openapi.models.V1Status;
 import io.kubernetes.client.util.Config;
-import io.kubernetes.client.util.PatchUtils;
-import io.kubernetes.client.util.Yaml;
-import lombok.SneakyThrows;
 import okhttp3.Call;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,7 +27,11 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
-import java.util.Map;
+
+import static io.example.bestpracticecontroller.ControllerHelper.convertApiExceptionToStatus;
+import static io.example.bestpracticecontroller.ControllerHelper.deepCopy;
+import static io.example.bestpracticecontroller.MyEventHandler.getDeploymentEventHandler;
+import static io.example.bestpracticecontroller.PatchStyle.JsonPatchImperative.updateDeploymentByJsonPatch;
 
 @Component
 @org.springframework.context.annotation.Configuration
@@ -46,18 +41,17 @@ public class BestPracticeController {
     final static Logger logger = LoggerFactory.getLogger(BestPracticeController.class);
 
     public BestPracticeController() throws IOException {
-
         ApiClient client = Config.defaultClient();
         client.setReadTimeout(10);
         Configuration.setDefaultApiClient(client);
         this.api = new AppsV1Api();
-
-
     }
 
     @Bean
     public CommandLineRunner startController(){
         return arg -> {
+            //Step 1: Setup Informer so that it can list and watch changes and put things in workqueue and indexer
+            //Tell informer what to watch and list for form the API server -- in this case Deployment changes
             SharedInformerFactory sharedInformerFactory = new SharedInformerFactory();
             SharedIndexInformer<V1Deployment> informer = sharedInformerFactory.sharedIndexInformerFor(
                     callParams -> getDeploymentListWatchCall(
@@ -67,22 +61,31 @@ public class BestPracticeController {
                     ),
                     V1Deployment.class,
                     V1DeploymentList.class,
-                    1000*5
+                    1000*5 //in case something not update to date, or re-connection etc, resync fully
             );
 
             try {
+                //Step 2: Setup a Rate limit queue so that informer knows where to put the changes
                 RateLimitingQueue<Request> workQueue = new DefaultRateLimitingQueue<>();
                 informer.addEventHandler(getDeploymentEventHandler(workQueue));
 
-                //Reconciler reconciler = getReconciler(informer.getIndexer());
-                Reconciler reconciler = getNullPointerReconciler(informer.getIndexer());
+                //Step 3: Where should the business logic goes to? Also, make sure our logic has access to the resource object
+                //By passing indexer from the informer, so business logic can access the local cached copy of resource object
+                Reconciler reconciler = getReconciler(informer.getIndexer());
 
+                //Step 4: Wire everything together:
+                //        Which reconciler (business logic)
+                //        Which workqueue to start when this controller start
+                //        How many worker (reconciler) threads this controller should run
                 Controller controller = ControllerBuilder.defaultBuilder(sharedInformerFactory)
                         .withReconciler(reconciler)
                         .withWorkQueue(workQueue)
                         .withWorkerCount(16)
                         .build();
 
+                //Step 5: A controller manager to start/shutdown controller, if you have multiple controllers,
+                //        this manager will provide multi-thread support. Also, orchestration for informer and
+                //        various debug logging checkpoints etc
                 ControllerManager manager = ControllerBuilder.controllerManagerBuilder(sharedInformerFactory)
                         .addController(controller)
                         .build();
@@ -93,56 +96,18 @@ public class BestPracticeController {
         };
     }
 
-    public String dumpJSON(Object crd){
-        Gson gson = new Gson();
-        return gson.toJson(crd);
-    }
-
-    public String dumpYAMLwithWorkaround(Object crd){
-        //System.out.println(Yaml.dump(crd));
-        //You should see there is a bug that cannot dump the essential boolean value of V1beta1CustomResourceDefinitionVersion
-        //See https://github.com/kubernetes-client/java/issues/340
-
-        Gson gson = new Gson();
-        String json = gson.toJson(crd);
-
-        org.yaml.snakeyaml.Yaml yaml = new org.yaml.snakeyaml.Yaml();
-        Object result = yaml.load(json);
-
-        return yaml.dumpAsMap(result);
-    }
-
-    private Reconciler getNullPointerReconciler(Indexer<V1Deployment> indexer){
-        return new Reconciler() {
-
-            @Override
-            public Result reconcile(Request request) {
-                try{
-                    System.out.println("Current Reconcile thread name: " + Thread.currentThread().getName());
-//                    return this.doWork(request);
-                }catch (Exception e){
-                    logger.debug(e.getMessage());
-                }
-
-                //logger.debug("Throw nullpointer exception");
-                //throw new NullPointerException();
-                return new Result(false);
-            }
-        };
-    }
-
     private Reconciler getReconciler(Indexer<V1Deployment> indexer){
         Reconciler reconciler = new Reconciler() { //Yes, i know it's a lambda, for clarity, keep traditional way
 
-            @SneakyThrows
             private Result doWork(Request request){
+                //Step 1: We got trigger by WorkQueue
                 logger.debug("Reconciler: " + request.toString());
 
+                //Step 2: Let's get the resource using key from the request
                 //As a practice, when you need to mutate the the resource object state
                 //deep copy the object because it is shared amongst all other controller/worker in the same JVM
                 logger.debug("Indexer keys: " + indexer.listKeys());
                 final V1Deployment _dont_use_orgDeploy = indexer.getByKey(request.getNamespace() + "/" + request.getName());
-                /*
                 if(_dont_use_orgDeploy==null){
                     //Since the delay between Request coming from workqueue and indexer can be very long
                     //The resource object might have been deleted from indexer, thus causing null pointer exception
@@ -150,180 +115,52 @@ public class BestPracticeController {
                     logger.debug("Indexer is empty with object:" + request.getNamespace() + "/" + request.getName());
                     return new Result(false); //In our use case, object not exists == we don't apply any best practices
                 }
-                logger.debug("Indexer getByKey: " + _dont_use_orgDeploy.getMetadata().getName());
-                 */
-
+                //Step 3: Deep Copy to keep in this thread, make sure the indexer's copy isn't touched
                 V1Deployment orgDeploy = deepCopy(_dont_use_orgDeploy);
+                logger.debug("Indexer getByKey: " + orgDeploy.getMetadata().getName());
 
-                V1Deployment responsedDeploy;
+                //Step 4: Do business logic to patch/update/replace resource to achieve our goal
+                V1Deployment responsedDeploy = doBusinessLogicToResource(orgDeploy, api);
 
-                try {
-                    responsedDeploy = replaceDeployment(orgDeploy);
-                    //responsedDeploy = updateDeploymentByJsonPatch(orgDeploy);
-                    //responsedDeploy = updateDeploymentByJsonMerge(orgDeploy);
-                    logger.debug("Updated/Patched - ResponsedDeploy: " + responsedDeploy.getMetadata().getName());
-                    //return new Result(false);
-                } catch (ApiException e) {
-                    logger.debug(e.getResponseBody());
-                    logger.debug(e.getStackTrace().toString());
-                }catch (RuntimeException e){
-                    logger.debug(e.getMessage());
+                //Step 5: Report if the business logic has been success or not
+                if(responsedDeploy == null){
+                    return new Result(true); //requque because last request failed
                 }
-                return new Result(true); //requeue because last request failed
+                return new Result(false);
             }
 
             @Override
             public Result reconcile(Request request) {
-                try{
+                try{ //protection of uncaught exception
+                    //Please read https://github.com/kubernetes-client/java/issues/961 for reason
+                    //we want to catch exception to make sure this thread keep alive as much as possible
                     return this.doWork(request);
                 }catch (Exception e){
                     logger.debug(e.getMessage());
                 }
                 return new Result(false);
             }
-
         };
         return reconciler;
     }
 
-    /*
-    Using replace is different from patch, you have to use a "read-then-write" operation.
-    Replace in API = HTTP Put verb in wire level
-    An optimistic lock failure can occur, because of changes between read and write operation.
-    The optimistic lock is implemented by comparing resourceVersion.
-    eg:
-    Thread 1 <-read--  V1Deployment [resourceVersion = 1]
-    Thread 2 --write-> V1Deployment  #server side version = 2
-    Thread 1 --write-> V1Deployment (with changes) [resourceVersion =1 ]  #Conflict here since server side is 2 but thread 1 is version 1
-    We are not going to do anything for this conflict because the next reconcile cycle will start with read-then-write again
-     */
-    private V1Deployment replaceDeployment(V1Deployment orgDeploy) throws ApiException {
-        logger.debug("Using ReplaceDeployment method");
-        V1Deployment afterDeploy = changeAnnotationAndLabel(orgDeploy);
-        return api.replaceNamespacedDeployment(
-                orgDeploy.getMetadata().getName(),
-                orgDeploy.getMetadata().getNamespace(),
-                afterDeploy,
-                null,
-                null,
-                null
-                );
-    }
-
-    private V1Deployment updateDeploymentByJsonPatch(V1Deployment beforeDeployment) throws ApiException {
-        logger.debug("UpdateDeploymentByJsonPatch(Ops - Impreative): " + beforeDeployment.getMetadata().getNamespace() + "/" + beforeDeployment.getMetadata().getName());
-
-        V1Deployment afterDeployment = changeAnnotationAndLabel(deepCopy(beforeDeployment));
-
-        String patch = getJSONPatchOps(beforeDeployment, afterDeployment);
-        return executeJSONPatch(beforeDeployment,patch, V1Patch.PATCH_FORMAT_JSON_PATCH);
-    }
-
-    private V1Deployment updateDeploymentByJsonMerge(V1Deployment deploy) throws ApiException {
-        logger.debug("UpdateDeploymentByJsonMerge(Merge - Declarative): " + deploy.getMetadata().getNamespace() + "/" + deploy.getMetadata().getName());
-        String patch = getAnnotationJSONMergePatch();
-        return executeJSONPatch(deploy, patch, V1Patch.PATCH_FORMAT_JSON_MERGE_PATCH);
-    }
-
-    //This is the changes we want to make to the Deployment
-    private V1Deployment changeAnnotationAndLabel(V1Deployment afterDeployment) {
-        V1ObjectMeta meta = afterDeployment.getMetadata();
-        meta.putLabelsItem("a", "b");
-        meta.getLabels().remove("app");
-        meta.putAnnotationsItem("annotationkey","value");
-        return afterDeployment;
-    }
-
-    //Somehow certain field that we do not care get caught by JSONPatch, this allows a cleaner Patch Ops
-    //This is very manually
-    //#TODO: Any better way to setup resource object that JSONPatch does not do unnecessary work?
-    private V1Deployment removeUnnecessaryFieldForPatch(V1Deployment deployment) {
-        deployment.setStatus(null); //No need to patch the status
-        deployment.getMetadata().setCreationTimestamp(null);
-        return deployment;
-    }
-
-    //easiest way (for devloper) is to just export and import
-    private <T> T deepCopy(T rd){
-        Class<T> resourceClass = (Class<T>) rd.getClass();
-        return Yaml.loadAs(Yaml.dump(rd), resourceClass);
-    }
-
-    //Declarative way of JSON patch
-    private String getAnnotationJSONMergePatch(){
-        V1ObjectMeta meta = new V1ObjectMetaBuilder()
-                .withAnnotations(Map.of("io.example.bestpractice","managing"))
-                .addToLabels("a","b")
-                .addToLabels("app",null)
-                .build();
-        V1Deployment newDeploy = new V1DeploymentBuilder()
-                .withMetadata(meta)
-                .build();
-        String patch = dumpJSON(newDeploy);
-        logger.debug("Get Annotation JSONMergePatch: " + patch);
-
-        return patch;
-    }
-
-    //Imperative way of JSON patch
-    private String getJSONPatchOps(V1Deployment beforeDeploy, V1Deployment afterDeploy){
-
-        beforeDeploy = removeUnnecessaryFieldForPatch(beforeDeploy);
-        afterDeploy = removeUnnecessaryFieldForPatch(afterDeploy);
-
-        String beforeJson = dumpJSON(beforeDeploy);
-        String afterJson = dumpJSON(afterDeploy);
-
-        ObjectMapper om = new ObjectMapper();
+    private V1Deployment doBusinessLogicToResource(V1Deployment orgDeploy, AppsV1Api api) {
+        V1Deployment responsedDeploy;
         try {
-            JsonNode newDeployJsonNode = om.readValue(afterJson,JsonNode.class);
-            JsonNode currentDeployJsonNode = om.readValue(beforeJson,JsonNode.class);
-            JsonNode patch = JsonDiff.asJson(currentDeployJsonNode, newDeployJsonNode);
-            return patch.toString();
-        } catch (JsonProcessingException e) {
+            //This part is for K8S resource patching, please uncomment the method you want to use
+            responsedDeploy = updateDeploymentByJsonPatch(orgDeploy, api);
+            //responsedDeploy = updateDeploymentByJsonMerge(orgDeploy, api);
+            //responsedDeploy = replaceDeployment(orgDeploy, api);
+            logger.debug("Updated/Patched - ResponsedDeploy: " + responsedDeploy.getMetadata().getName());
+            return responsedDeploy;
+        } catch (ApiException e) {
+            V1Status status = convertApiExceptionToStatus(e.getResponseBody());
+            logger.debug(status.toString());
+            e.printStackTrace();
+        } catch (RuntimeException e){
             e.printStackTrace();
         }
-        return "";
-    }
-
-    private V1Deployment executeJSONPatch(V1Deployment orgDeploy, String patch, String patchType) throws ApiException {
-            return PatchUtils.patch(
-                    V1Deployment.class,
-                    () -> api.patchNamespacedDeploymentCall(
-                            orgDeploy.getMetadata().getName(),
-                            orgDeploy.getMetadata().getNamespace(),
-                            new V1Patch(patch),
-                            null,
-                            null,
-                            null,
-                            null,
-                            null
-                    ),
-                    patchType,
-                    api.getApiClient()
-            );
-    }
-
-    private ResourceEventHandler<V1Deployment> getDeploymentEventHandler(RateLimitingQueue<Request> workQueue) {
-        return new ResourceEventHandler<V1Deployment>() {
-            @Override
-            public void onAdd(V1Deployment deploy) {
-                workQueue.add(new Request(deploy.getMetadata().getNamespace(), deploy.getMetadata().getName()));
-                logger.debug("WQ len: " + workQueue.length() +" Event Handler(OnAdd) Name: " + deploy.getMetadata().getName() + " Version: " + deploy.getMetadata().getResourceVersion());
-            }
-
-            @Override
-            public void onUpdate(V1Deployment before, V1Deployment after) {
-                workQueue.add(new Request(before.getMetadata().getNamespace(), before.getMetadata().getName()));
-                logger.debug("WQ len: " + workQueue.length() +" Event Handler(OnUpdate) Name: " + before.getMetadata().getName() + " Before Version: " + before.getMetadata().getResourceVersion() + "After version: " + after.getMetadata().getResourceVersion());
-            }
-
-            @Override
-            public void onDelete(V1Deployment deploy, boolean b) {
-                //workQueue.add(new Request(deploy.getMetadata().getNamespace(), deploy.getMetadata().getName()));
-                logger.debug("WQ len: " + workQueue.length() + " Event Handler(OnDelete) Name: " + deploy.getMetadata().getName() + " Delete boolean: " + b );
-            }
-        };
+        return null;
     }
 
     public Call getDeploymentListWatchCall(String resourceVersion, Integer timeoutSeconds, Boolean watch) {
