@@ -12,8 +12,13 @@ import io.kubernetes.client.openapi.models.V1Deployment;
 import io.kubernetes.client.openapi.models.V1Status;
 import io.kubernetes.client.util.PatchUtils;
 import io.kubernetes.client.util.Yaml;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class ControllerHelper {
+
+    private final static Logger logger = LoggerFactory.getLogger(ControllerHelper.class);
+
     public static String dumpJSON(Object crd){
         Gson gson = new Gson();
         return gson.toJson(crd);
@@ -56,6 +61,7 @@ public class ControllerHelper {
 
 
     public static V1Deployment executeJSONPatch(V1Deployment orgDeploy, String patch, String patchType, AppsV1Api api) throws ApiException {
+        logger.debug("JsonPatch Type: " + patchType + " Patch: " + patch);
         return PatchUtils.patch(
                 V1Deployment.class,
                 () -> api.patchNamespacedDeploymentCall(
