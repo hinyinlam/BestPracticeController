@@ -31,7 +31,7 @@ import java.io.IOException;
 import static io.example.bestpracticecontroller.ControllerHelper.convertApiExceptionToStatus;
 import static io.example.bestpracticecontroller.ControllerHelper.deepCopy;
 import static io.example.bestpracticecontroller.MyEventHandler.getDeploymentEventHandler;
-import static io.example.bestpracticecontroller.PatchStyle.JsonPatchImperative.updateDeploymentByJsonPatch;
+import static io.example.bestpracticecontroller.PatchStyle.StrategyMergeDeclarative.updateDeploymentByStrategyMerge;
 
 @Component
 @org.springframework.context.annotation.Configuration
@@ -148,8 +148,9 @@ public class BestPracticeController {
         V1Deployment responsedDeploy;
         try {
             //This part is for K8S resource patching, please uncomment the method you want to use
-            responsedDeploy = updateDeploymentByJsonPatch(orgDeploy, api);
+            //responsedDeploy = updateDeploymentByJsonPatch(orgDeploy, api);
             //responsedDeploy = updateDeploymentByJsonMerge(orgDeploy, api);
+            responsedDeploy = updateDeploymentByStrategyMerge(orgDeploy, api);
             //responsedDeploy = replaceDeployment(orgDeploy, api);
             logger.debug("Updated/Patched - ResponsedDeploy: " + responsedDeploy.getMetadata().getName());
             return responsedDeploy;
