@@ -12,11 +12,13 @@ By leveraging the operator pattern, we can setup policy for production use and c
 
 ---
 
-##Support doc
-###Blog
+## Support doc
+### Blog
 This is the code for the blog:
 
 [Kubernetes Controller — Implement in Java (Part 1)](https://medium.com/@hinyinlam/kubernetes-controller-implement-in-java-part-1-4bd717f88b55)
+
+[K8S Java Client SDK — Patching and update a resource](https://medium.com/@hinyinlam/k8s-java-client-sdk-patching-and-update-a-resource-3b42de7f69ed)
 
 Prerequisite reads:
 
@@ -24,16 +26,16 @@ Prerequisite reads:
 
 [Coding K8S resource in Java — Part 2 (Java Client)](https://medium.com/@hinyinlam/coding-k8s-resource-in-java-part-2-java-client-4d3341687477)
 
-###How to Build
+### How to Build
 Some known issues with Java 11's TLS with minikube
 Note: When you build this project with Java 11 and Maven, please use:
 ```mvn clean package -Djdk.tls.client.protocols=TLSv1.2 -DskipTests```
 
 ---
 
-##Release note:
+## Release note:
 
-###Version 0.1:
+### Version 0.1:
 This version does not enforce best practice except showing off how:
 
 1. Deep copy works in OpenAPI generated Java SDK
