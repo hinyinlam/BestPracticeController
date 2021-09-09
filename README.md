@@ -1,6 +1,6 @@
-#Best Practice Controller for Kubernetes
+# Best Practice Controller for Kubernetes
 
-##What is this controller about?
+## What is this controller about?
 
 This best practice controller is an example controller written in Pure Java by using K8S Java Client SDK.
 
